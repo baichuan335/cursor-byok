@@ -52,7 +52,7 @@ Cursor BYOK combines a local Rust gateway with a React / Tauri desktop managemen
 4. If this repository does not yet provide the asset you need, build from source below. A source version number or successful local build does not mean a GitHub Release has been published.
 
 > [!WARNING]
-> **The derivative's update channel is not connected yet.** The application's built-in update configuration still points to upstream release sources and the upstream update public key. It is not this repository's update service. Check and install this maintained version manually from this repository's Releases; do not interpret in-app update notices as derivative release notifications. This documentation change does not modify those application settings.
+> **Update signing configuration has been migrated; existing installers do not change with source edits.** Current source uses this maintainer's update public key, with both the standard and Windows portable update manifests pointing to this repository. The previously released 1.0.2 installer still contains the old configuration. Install the first build using the new configuration manually before relying on later maintained updates. No newly signed update release has been published yet, and end-to-end download, signature verification, and installation remain unverified. Tauri update signing is separate from Windows code signing or Apple signing and notarization.
 
 Upgrades do not actively remove old plugin credentials, advertisement caches, or historical call records; the new version no longer uses resources dedicated to removed features. If Commit settings previously selected a plugin model, choose an existing model or **Direct** in **System settings → Commit Settings** and save. An invalid old selection will not silently switch to a potentially billable official service.
 
@@ -199,7 +199,7 @@ cursor-byok/
 
 Report problems in [this repository's Issues](https://github.com/baichuan335/cursor-byok/issues) or submit a [Pull Request](https://github.com/baichuan335/cursor-byok/pulls). Include your operating system, Cursor and Cursor BYOK versions, model protocol, minimal reproduction steps, and sanitized error logs. Do not disclose credentials, private code, or conversation contents.
 
-Documentation changes do not fix update endpoints, tutorial URLs, or third-party service configuration. Those still require separate implementation and verification. Treat the current source, actual builds, and this repository's release notes as the record of available features, not planned work.
+Update endpoints and the public key have been migrated in current source; the tutorial entry and default public TAB service still use upstream settings. A newly signed update release and actual automatic upgrades still require separate verification. Treat the current source, actual builds, and this repository's release notes as the record of available features, not planned work.
 
 ## Authors, origin, and license
 
