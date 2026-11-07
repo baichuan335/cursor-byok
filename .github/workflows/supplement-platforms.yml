@@ -130,7 +130,7 @@ jobs:
               matches = sorted(bundle.rglob(pattern))
               assert matches, "Missing bundle: " + pattern
               for path in matches:
-                  destination = output / path.name.replace(" ", ".")
+                  destination = output / (platform + "-" + path.name.replace(" ", "."))
                   assert not destination.exists(), "Duplicate asset name"
                   shutil.copy2(path, destination)
                   files.append(destination)
