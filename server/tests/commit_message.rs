@@ -228,6 +228,29 @@ async fn tool_call_events_are_rejected() {
     assert!(text.contains("must not invoke tools"));
 }
 
+/// An obsolete saved identifier stays user-owned data, not an executable provider.
+#[tokio::test]
+async fn removed_plugin_selection_is_preserved_but_never_executed() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let settings = CommitSettings {
+        model_id: "plugin:removed/provider/model".into(),
+        prompt: "Keep my prompt".into(),
+        prompt_locale: CommitPromptLocale::ZhCn,
+    };
+    store.set_commit_settings(settings.clone()).await.unwrap();
+    let provider = fake_provider::FakeProvider::default();
+    let router = commit_router(store.clone(), provider.clone()).await;
+
+    let response = post_commit_message(router, diff_request("diff --git a/x.rs")).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("select a configured model in the commit settings"));
+    assert!(provider.requests().is_empty());
+    assert_eq!(store.commit_settings().await.unwrap(), settings);
+}
+
 #[tokio::test]
 async fn unconfigured_model_is_rejected() {
     let (_directory, store) = fixtures::temp_store().await;

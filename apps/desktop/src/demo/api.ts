@@ -110,7 +110,6 @@ export function installDemoApi() {
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const body = await readBody(input, init);
 
-    if (path === "/promotions") return json({ slots: [] });
     if (path === "/models" && method === "GET") return json(models);
     if (path === "/models" && method === "POST") return json(models);
     if (path === "/models/order") return json(models);
@@ -129,6 +128,7 @@ export function installDemoApi() {
     if (path === "/llm-calls") return json(calls);
     if (path.startsWith("/llm-calls/")) return json(createCallDetail(path.slice("/llm-calls/".length)));
     if (path === "/harness/cursor/status") return json(harnessStatus);
+    if (path === "/harness/cursor/runtime-status") return json({ mismatch_count: 0, last_detected_at_ms: null });
     if (path === "/harness/cursor/ca/initialize") return json(harnessStatus);
     if (path === "/harness/cursor/enabled") {
       const enabled = Boolean((body as { enabled?: unknown } | null)?.enabled);
@@ -182,7 +182,6 @@ export function installDemoApi() {
       }
       return empty();
     }
-    if (path.endsWith("/dismissals")) return empty();
 
     return json({ message: `Unhandled demo endpoint: ${method} ${path}` }, 404);
   };

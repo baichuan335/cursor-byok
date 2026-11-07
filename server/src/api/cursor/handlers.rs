@@ -49,6 +49,18 @@ fn router_with_proxy(
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
         .route("/aiserver.v1.BidiService/BidiAppend", post(bidi_handler))
         .route(
+            "/aiserver.v1.InferenceService/RunInference",
+            post(reject_inference),
+        )
+        .route(
+            "/aiserver.v1.InferenceService/RunInferenceSSE",
+            post(reject_inference),
+        )
+        .route(
+            "/aiserver.v1.InferenceService/RunInferencePoll",
+            post(reject_inference),
+        )
+        .route(
             "/aiserver.v1.AiService/AvailableDocs",
             post(compatibility::available_docs),
         )
@@ -188,6 +200,28 @@ async fn is_connected() -> Result<Response<Body>> {
     Ok(response)
 }
 
+// These RPC names identify the unsupported runtime without inspecting a payload.
+// Cursor's streaming Connect client discards non-200 JSON bodies, so the exact
+// enrollment denial must be carried in an EndStream error, not an HTTP 403.
+async fn reject_inference(State(registry): State<TransportRegistry>) -> Result<Response<Body>> {
+    registry.runtime_compatibility().report_mismatch();
+    runtime_denial_stream()
+}
+
+fn runtime_denial_stream() -> Result<Response<Body>> {
+    let frame = connect::encode_error_end_stream(&connect::ConnectStreamError {
+        code: connect::ConnectCode::PermissionDenied,
+        message: crate::error::CURSOR_RUNTIME_DENIAL.into(),
+        details: vec![],
+    })?;
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/connect+proto")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("connect-protocol-version", "1")
+        .body(Body::from(frame))
+        .expect("static runtime rejection response"))
+}
+
 async fn run_sse_handler(
     State(registry): State<TransportRegistry>,
     Extension(proxy): Extension<CursorProxy>,
@@ -204,6 +238,22 @@ async fn run_sse_handler(
         serde_json::json!({"request_id": request.request_id}),
     );
     match route {
+        crate::cursor::transport::TransportRoute::RuntimeRejected => {
+            let frame = connect::encode_error_end_stream(&connect::ConnectStreamError {
+                code: connect::ConnectCode::PermissionDenied,
+                message: crate::error::CURSOR_RUNTIME_DENIAL.into(),
+                details: vec![],
+            })?;
+            trace.response_started(StatusCode::OK.as_u16());
+            trace.response_chunk("byok_server", frame.clone());
+            trace.finish(Some(crate::error::CURSOR_RUNTIME_DENIAL));
+            Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header("connect-protocol-version", "1")
+                .body(Body::from(frame))
+                .expect("static runtime rejection response"))
+        }
         crate::cursor::transport::TransportRoute::Local => {
             run_sse::stream(&registry, &request.request_id).await
         }
@@ -232,16 +282,44 @@ async fn bidi_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    let decoded = bidi::decode(&request)?;
+    let decoded = match bidi::decode(&request) {
+        Ok(decoded) => decoded,
+        Err(crate::Error::CursorRuntimeMismatch) => {
+            // No payload, model credentials or conversation text enter diagnostics.
+            let request_id = &request
+                .request_id
+                .as_ref()
+                .expect("validated Bidi request ID")
+                .request_id;
+            let trace = registry.trace(request_id);
+            trace.begin(None, "local_byok", None);
+            trace.request(
+                "bidi_request",
+                Bytes::new(),
+                serde_json::json!({
+                    "append_seqno": request.append_seqno,
+                    "message_type": "run_inference",
+                    "accepted": false,
+                    "route_outcome": "runtime_mismatch",
+                    "recovery": "client_backend_agent_reroute",
+                }),
+            );
+            trace.finish(Some(crate::error::CURSOR_RUNTIME_DENIAL));
+            registry.reject_runtime(request_id).await;
+            tracing::warn!(
+                request_id,
+                "detected Cursor local-loop protocol; requesting client-side backend Agent reroute"
+            );
+            return Err(crate::Error::CursorRuntimeMismatch);
+        }
+        Err(error) => return Err(error),
+    };
     let first_model = decoded.model_id().map(str::to_owned);
     let conversation_id = decoded.conversation_id().map(str::to_owned);
     let trace_metadata = decoded.trace_metadata();
     let trace = registry.trace(&decoded.request_id);
     let local = if let Some(model_id) = decoded.model_id() {
-        // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
-        if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
-            || registry.store().model(model_id).await?.is_some()
-        {
+        if registry.store().model(model_id).await?.is_some() {
             tracing::info!(
                 request_id = decoded.request_id,
                 model_id,

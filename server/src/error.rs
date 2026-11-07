@@ -7,12 +7,19 @@ use axum::{
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+// Cursor 3.29.9 matches both PermissionDenied and this exact raw message to
+// reroute a local-loop attempt using the client's complete conversation state.
+pub const CURSOR_RUNTIME_DENIAL: &str =
+    "InferenceService.RunInference is not enabled for this account";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("{CURSOR_RUNTIME_DENIAL}")]
+    CursorRuntimeMismatch,
     #[error("provider error: {0}")]
     Provider(String),
     #[error("store error: {0}")]
@@ -44,6 +51,7 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match self {
+            Self::CursorRuntimeMismatch => StatusCode::FORBIDDEN,
             Self::Config(_) | Self::Protocol(_) | Self::Decode(_) | Self::Json(_) => {
                 StatusCode::BAD_REQUEST
             }
@@ -59,11 +67,12 @@ impl IntoResponse for Error {
         };
         // 所有回给 UI 的错误统一落日志,否则失败原因只出现在前端提示里。
         tracing::warn!(%status, error = %self, "request failed");
-        let code = match status {
-            StatusCode::BAD_REQUEST => "invalid_argument",
-            StatusCode::NOT_FOUND => "not_found",
-            StatusCode::CONFLICT => "aborted",
-            StatusCode::BAD_GATEWAY => "unavailable",
+        let code = match (&self, status) {
+            (Self::CursorRuntimeMismatch, _) => "permission_denied",
+            (_, StatusCode::BAD_REQUEST) => "invalid_argument",
+            (_, StatusCode::NOT_FOUND) => "not_found",
+            (_, StatusCode::CONFLICT) => "aborted",
+            (_, StatusCode::BAD_GATEWAY) => "unavailable",
             _ => "internal",
         };
         (

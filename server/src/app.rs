@@ -13,7 +13,6 @@ use crate::{
         transport::TransportRegistry,
     },
     local_app::CursorHarness,
-    plugin::{PluginRegistry, PluginRuntime},
     provider::ProviderRouter,
     search::WebCache,
     store::Store,
@@ -38,23 +37,15 @@ impl App {
         }
         let assets = PromptAssets::embedded()?;
         let compiler = PromptCompiler::new(assets);
-        let plugin_runtime = PluginRuntime::managed()?;
-        let plugins = PluginRegistry::managed(
-            store.clone(),
-            plugin_runtime.clone(),
-            config.app_version.clone(),
-        )?;
         let clients = crate::network::NetworkClients::new(store.clone());
         let provider = std::sync::Arc::new(ProviderRouter::new(
             store.clone(),
-            plugins.clone(),
             clients.clone(),
             config.provider_request_timeout,
             config.provider_stream_idle_timeout,
         ));
         let byok = api::byok::router(
             store.clone(),
-            plugins.clone(),
             provider.clone(),
             Some(api::byok::NativeForwarder::new(
                 store.clone(),
@@ -63,21 +54,18 @@ impl App {
                 config.provider_stream_idle_timeout,
             )),
         );
-        let registry = TransportRegistry::with_plugins(
+        let registry = TransportRegistry::with_web_cache_and_local_rules(
             store.clone(),
             provider.clone(),
             compiler,
             WebCache::managed()?,
-            plugins.clone(),
             crate::config::managed_data_dir()?.join("rules"),
         );
         let control = control::ControlService::new(
             store.clone(),
             provider,
-            plugin_runtime,
-            plugins,
             clients.clone(),
-            config.app_version.clone(),
+            registry.runtime_compatibility().clone(),
         )?;
         let harness = control.cursor_harness().clone();
         let mut router = api::router(registry.clone(), clients)?.merge(byok);

@@ -12,6 +12,12 @@ pub async fn status(State(service): State<ControlService>) -> Result<Json<Cursor
     Ok(Json(service.cursor_harness().status().await?))
 }
 
+pub async fn runtime_status(
+    State(service): State<ControlService>,
+) -> Json<crate::cursor::services::runtime_compatibility::RuntimeCompatibilityStatus> {
+    Json(service.runtime_compatibility().status())
+}
+
 pub async fn initialize_ca(
     State(service): State<ControlService>,
 ) -> Result<Json<CursorHarnessStatus>> {

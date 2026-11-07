@@ -9,9 +9,8 @@ import { CallsPage } from "./features/calls/CallsPage";
 import { CallDetailsPage } from "./features/calls/CallDetailsPage";
 import { CursorSettingsPage } from "./features/models/CursorSettingsPage";
 import { HomePage } from "./features/home/HomePage";
-import { PluginManagementPage } from "./features/plugins/PluginManagementPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
-import { useAppStore } from "./shared/store/appStore";
+import { appStore, useAppStore } from "./shared/store/appStore";
 import { updateStore } from "./shared/store/updateStore";
 
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
@@ -27,7 +26,6 @@ export function App() {
               <Route index element={<HomePage />} />
               <Route path="calls" element={<CallsPage />} />
               <Route path="harness/cursor" element={<CursorSettingsPage />} />
-              <Route path="plugins" element={<PluginManagementPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -40,7 +38,8 @@ export function App() {
 }
 
 function AppMessages() {
-  const { error } = useAppStore();
+  const { error, cursorRuntime } = useAppStore();
+  const lastRuntimeWarning = useRef(0);
   const previousError = useRef<string | null>(null);
   const lastAutomaticUpdateCheckAt = useRef(0);
   const showMessage = useMessage();
@@ -49,6 +48,29 @@ function AppMessages() {
     if (error && error !== previousError.current) showMessage(error);
     previousError.current = error;
   }, [error, showMessage]);
+
+  useEffect(() => {
+    if (!cursorRuntime) return;
+    if (cursorRuntime.mismatch_count > lastRuntimeWarning.current) {
+      showMessage(t("检测到 Cursor 本地编排，已请求客户端安全切回后端 Agent；若仍失败，请在 Cursor 配置页查看恢复说明。"), { duration: 8_000 });
+    }
+    lastRuntimeWarning.current = cursorRuntime.mismatch_count;
+  }, [cursorRuntime, showMessage]);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void appStore.refreshCursorRuntimeStatus();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 10_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;

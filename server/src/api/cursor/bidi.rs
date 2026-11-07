@@ -1,4 +1,6 @@
 //! Accepts ordered Cursor Bidi append requests and routes them by request_id.
+use std::borrow::Cow;
+
 use prost::Message;
 
 use crate::{
@@ -160,23 +162,125 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
         .map(|id| id.request_id.as_str())
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::Protocol("BidiAppend request_id is required".into()))?;
-    if !request.data_binary.is_empty() {
-        return Err(Error::Protocol(
-            "BidiAppend data_binary is not part of the captured protocol".into(),
-        ));
-    }
-    if request.data.is_empty() {
+    // Cursor sends the same raw AgentClientMessage protobuf as either hex data
+    // or data_binary. Match the capture decoder's data-first precedence.
+    let payload = if !request.data.is_empty() {
+        Cow::Owned(
+            hex::decode(&request.data)
+                .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?,
+        )
+    } else if !request.data_binary.is_empty() {
+        Cow::Borrowed(request.data_binary.as_slice())
+    } else {
         return Err(Error::Protocol(
             "BidiAppend contains no AgentClientMessage".into(),
         ));
-    }
-    let payload = hex::decode(&request.data)
-        .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
+    };
+    let message = match agent::AgentClientMessage::decode(payload.as_ref()) {
+        Ok(message) => message,
+        Err(_) if is_inference_run(&payload) => {
+            return Err(Error::CursorRuntimeMismatch);
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(DecodedAppend {
         request_id: request_id.into(),
         seqno: request.append_seqno,
-        message: agent::AgentClientMessage::decode(payload.as_slice())?,
+        message,
     })
+}
+
+// A diagnostic projection, not a second Agent runtime. Never reinterpret its
+// conversation ID as ConversationStateStructure or manufacture missing history.
+#[derive(Message)]
+struct InferenceEnvelope {
+    #[prost(message, optional, tag = "1")]
+    run_request: Option<InferenceRun>,
+}
+
+#[derive(Message)]
+struct InferenceRun {
+    #[prost(string, tag = "1")]
+    conversation_id: String,
+    #[prost(message, optional, tag = "3")]
+    requested_model: Option<InferenceModel>,
+    #[prost(string, optional, tag = "5")]
+    agent_mode: Option<String>,
+    #[prost(bool, tag = "17")]
+    supports_agent_loop_error: bool,
+    #[prost(bool, tag = "18")]
+    supports_delta_invocations: bool,
+}
+
+#[derive(Message)]
+struct InferenceModel {
+    #[prost(string, tag = "1")]
+    model_id: String,
+}
+
+fn is_inference_run(payload: &[u8]) -> bool {
+    if !has_unique_inference_fields(payload) {
+        return false;
+    }
+    let Ok(envelope) = InferenceEnvelope::decode(payload) else {
+        return false;
+    };
+    let Some(run) = envelope.run_request else {
+        return false;
+    };
+    // These two bool fields have incompatible wire types in AgentRunRequest
+    // (message and string). Cursor 3.29.9 sets both on every inference run.
+    uuid::Uuid::try_parse(&run.conversation_id).is_ok()
+        && run
+            .requested_model
+            .is_some_and(|model| !model.model_id.is_empty())
+        && matches!(
+            run.agent_mode.as_deref(),
+            Some("agent" | "ask" | "plan" | "debug" | "multitask")
+        )
+        && run.supports_agent_loop_error
+        && run.supports_delta_invocations
+}
+
+// Reject conflicting outer oneofs and duplicate discriminator fields. Prost
+// normally merges duplicates, which is too permissive for protocol detection.
+fn has_unique_inference_fields(payload: &[u8]) -> bool {
+    use prost::encoding::{decode_key, decode_varint, skip_field, DecodeContext, WireType};
+    let mut outer = payload;
+    if decode_key(&mut outer).ok() != Some((1, WireType::LengthDelimited)) {
+        return false;
+    }
+    let Ok(length) = decode_varint(&mut outer) else {
+        return false;
+    };
+    if length != outer.len() as u64 {
+        return false;
+    }
+    let mut seen = 0_u8;
+    let mut run = outer;
+    while !run.is_empty() {
+        let Ok((tag, wire)) = decode_key(&mut run) else {
+            return false;
+        };
+        let discriminator = match tag {
+            1 => Some((1, WireType::LengthDelimited)),
+            3 => Some((2, WireType::LengthDelimited)),
+            5 => Some((4, WireType::LengthDelimited)),
+            17 => Some((8, WireType::Varint)),
+            18 => Some((16, WireType::Varint)),
+            _ => None,
+        };
+        if let Some((bit, expected)) = discriminator {
+            if seen & bit != 0 || wire != expected {
+                return false;
+            }
+            seen |= bit;
+        }
+        if skip_field(wire, tag, &mut run, DecodeContext::default()).is_err() {
+            return false;
+        }
+    }
+    seen == 31
 }
 
 pub async fn append(

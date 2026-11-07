@@ -415,50 +415,6 @@ mod tests {
     use super::*;
     use crate::model::ProviderType;
 
-    /// 插件模型不在 model_configs 中,调用记录必须照常落库并可按其稳定 ID 筛选。
-    #[tokio::test]
-    async fn plugin_calls_record_without_a_model_config_row() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::connect(&format!(
-            "sqlite://{}",
-            directory.path().join("test.db").display()
-        ))
-        .await
-        .unwrap();
-        let plugin_model = "plugin:dev.example/codex/gpt-test";
-        store
-            .start_llm_call(&NewLlmCall {
-                call_id: "plugin-call".into(),
-                run_id: "run".into(),
-                conversation_id: "conversation".into(),
-                provider_call_index: 0,
-                model_hash: plugin_model.into(),
-                provider_type: ProviderType::Plugin,
-                provider_url: "plugin://dev.example/codex".into(),
-                request_type: ProviderType::Plugin,
-                request_url: "plugin://dev.example/codex".into(),
-                model_id: "gpt-test".into(),
-                display_name: "GPT Test".into(),
-                reasoning_effort: None,
-                fast: false,
-                message_count: 1,
-                tool_count: 0,
-                detailed: false,
-            })
-            .await
-            .unwrap();
-        store
-            .finish_llm_call("plugin-call", "completed", None, 10, None, None)
-            .await
-            .unwrap();
-        let overview = store
-            .overview(None, None, Some(&format!("[\"{plugin_model}\"]")), None)
-            .await
-            .unwrap();
-        assert_eq!(overview.metrics.llm_calls, 1);
-        assert_eq!(overview.metrics.successful_calls, 1);
-    }
-
     #[tokio::test]
     async fn latest_context_usage_follows_conversation_chronology() {
         let directory = tempfile::tempdir().unwrap();
@@ -481,10 +437,10 @@ mod tests {
                     conversation_id: "conversation".into(),
                     provider_call_index: 0,
                     model_hash: model_id.into(),
-                    provider_type: ProviderType::Plugin,
-                    provider_url: "plugin://test".into(),
-                    request_type: ProviderType::Plugin,
-                    request_url: "plugin://test".into(),
+                    provider_type: ProviderType::OpenAiChat,
+                    provider_url: "https://provider.example/v1/chat/completions".into(),
+                    request_type: ProviderType::OpenAiChat,
+                    request_url: "https://provider.example/v1/chat/completions".into(),
                     model_id: model_id.into(),
                     display_name: model_id.into(),
                     reasoning_effort: None,

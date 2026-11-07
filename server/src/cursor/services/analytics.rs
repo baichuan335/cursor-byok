@@ -14,7 +14,7 @@ use crate::{api::cursor::proxy, Error, Result};
 
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
-const LOCAL_RULE: &str = "local_enabled";
+const AGENT_HOST_LOCAL_LOOP_GATE: &str = "agent_host_local_loop";
 
 #[derive(Clone, PartialEq, Message)]
 struct BootstrapStatsigResponse {
@@ -51,7 +51,7 @@ fn patch_upstream(response: proxy::BufferedResponse) -> Result<Response<Body>> {
     let (framed, payload) = unary_payload(&response.body)?;
     let mut message = BootstrapStatsigResponse::decode(payload)?;
     let mut config = serde_json::from_str::<Value>(&message.config)?;
-    enable_agent_retries(&mut config)?;
+    configure_agent_runtime(&mut config)?;
     message.config = serde_json::to_string(&config)?;
     Ok(response.with_body(encode_unary(&message, framed)))
 }
@@ -74,7 +74,7 @@ fn local_response() -> Result<Response<Body>> {
         },
         "time": generated_at_ms
     });
-    enable_agent_retries(&mut config)?;
+    configure_agent_runtime(&mut config)?;
     let message = BootstrapStatsigResponse {
         config: serde_json::to_string(&config)?,
         generated_at_ms,
@@ -96,17 +96,24 @@ fn local_response() -> Result<Response<Body>> {
     Ok(response)
 }
 
-fn enable_agent_retries(config: &mut Value) -> Result<()> {
+fn configure_agent_runtime(config: &mut Value) -> Result<()> {
     let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+    let local_loop_key = statsig_key(config, AGENT_HOST_LOCAL_LOOP_GATE);
     let root = config
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig bootstrap config must be an object".into()))?;
+    // Even an unchanged upstream response now carries a local runtime override.
+    root.insert("has_updates".into(), true.into());
     let gates = root
         .entry("feature_gates")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig feature_gates must be an object".into()))?;
-    gates.insert(gate_key.clone(), enabled_gate(&gate_key));
+    gates.insert(gate_key.clone(), local_gate(&gate_key, true));
+    // This gateway owns the Agent loop. Cursor's managed-local loop sends
+    // RunInferenceClientMessage through BidiAppend, not AgentClientMessage.
+    // Do not advertise a runtime whose protocol this server does not implement.
+    gates.insert(local_loop_key.clone(), local_gate(&local_loop_key, false));
     Ok(())
 }
 
@@ -127,14 +134,19 @@ fn djb2(value: &str) -> String {
         .to_string()
 }
 
-fn enabled_gate(name: &str) -> Value {
+fn local_gate(name: &str, enabled: bool) -> Value {
+    let rule = if enabled {
+        "local_enabled"
+    } else {
+        "local_disabled"
+    };
     json!({
         "name": name,
-        "value": true,
-        "rule_id": LOCAL_RULE,
-        "ruleID": LOCAL_RULE,
-        "group_name": LOCAL_RULE,
-        "groupName": LOCAL_RULE,
+        "value": enabled,
+        "rule_id": rule,
+        "ruleID": rule,
+        "group_name": rule,
+        "groupName": rule,
         "secondary_exposures": [],
         "secondaryExposures": [],
         "undelegated_secondary_exposures": [],
@@ -173,4 +185,78 @@ fn encode_unary(message: &impl Message, framed: bool) -> Bytes {
     output.put_u32(payload.len() as u32);
     output.extend_from_slice(&payload);
     output.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, http::HeaderMap};
+
+    const LOCAL_LOOP_GATE: &str = "agent_host_local_loop";
+
+    #[tokio::test]
+    async fn upstream_bootstrap_selects_backend_loop_for_every_hash_format() {
+        // Constants are computed independently of statsig_key to catch hash regressions.
+        for (hash_used, local_loop_key, retries_key) in [
+            ("none", LOCAL_LOOP_GATE, AGENT_RETRIES_GATE),
+            ("djb2", "1967931573", "101914982"),
+            (
+                "sha256",
+                "pL49GCl+NNaNm8gwzyKmb8/Gz7VEiiUMVG56Nk3v+d0=",
+                "ifvjhhnfrCEApPQP1Pgv02EJdaWKslFkfOhSOAezhxk=",
+            ),
+        ] {
+            for framed in [false, true] {
+                let unrelated = json!({"value": true, "rule_id": "upstream"});
+                let mut config = json!({
+                    "hash_used": hash_used,
+                    "feature_gates": {"unrelated": unrelated},
+                    "dynamic_configs": {"keep": {"value": 42}},
+                    "has_updates": false,
+                    "time": 123
+                });
+                config["feature_gates"][local_loop_key] =
+                    json!({"name": local_loop_key, "value": true, "rule_id": "upstream_enabled"});
+                let message = BootstrapStatsigResponse {
+                    config: config.to_string(),
+                    generated_at_ms: 456,
+                };
+                let response = patch_upstream(proxy::BufferedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: encode_unary(&message, framed),
+                })
+                .unwrap();
+                let length = response.headers()[header::CONTENT_LENGTH]
+                    .to_str()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(body.len(), length);
+                let (actual_framed, payload) = unary_payload(&body).unwrap();
+                assert_eq!(actual_framed, framed);
+                let decoded = BootstrapStatsigResponse::decode(payload).unwrap();
+                assert_eq!(decoded.generated_at_ms, 456);
+                let config: Value = serde_json::from_str(&decoded.config).unwrap();
+                assert_eq!(config["feature_gates"][local_loop_key]["value"], false);
+                assert_eq!(config["feature_gates"][retries_key]["value"], true);
+                assert_eq!(config["feature_gates"]["unrelated"], unrelated);
+                assert_eq!(config["dynamic_configs"]["keep"]["value"], 42);
+                assert_eq!(config["time"], 123);
+                assert_eq!(config["has_updates"], true);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_bootstrap_also_selects_backend_loop() {
+        let response = local_response().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let decoded = BootstrapStatsigResponse::decode(body).unwrap();
+        let config: Value = serde_json::from_str(&decoded.config).unwrap();
+        assert_eq!(config["feature_gates"][LOCAL_LOOP_GATE]["value"], false);
+        assert_eq!(config["feature_gates"][AGENT_RETRIES_GATE]["value"], true);
+    }
 }

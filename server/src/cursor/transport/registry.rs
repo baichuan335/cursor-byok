@@ -6,16 +6,19 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::{
     cursor::{
-        conversation::ConversationRegistry, prompting::PromptCompiler,
-        services::observability::CursorTraceService,
+        conversation::ConversationRegistry,
+        prompting::PromptCompiler,
+        services::{
+            observability::CursorTraceService, runtime_compatibility::RuntimeCompatibility,
+        },
     },
-    plugin::PluginRegistry,
     provider::Provider,
     search::WebCache,
     store::Store,
@@ -34,10 +37,11 @@ struct RegistryInner {
     next_local_generation: AtomicU64,
     upstream: Mutex<HashMap<String, u64>>,
     route_changed: Notify,
+    runtime_rejections: Mutex<HashMap<String, Instant>>,
+    runtime_compatibility: RuntimeCompatibility,
     store: Store,
     traces: CursorTraceService,
     web_cache: WebCache,
-    plugins: Option<PluginRegistry>,
     conversations: ConversationRegistry,
 }
 
@@ -51,6 +55,7 @@ struct LocalTransport {
 pub enum TransportRoute {
     Local,
     Upstream(u64),
+    RuntimeRejected,
 }
 
 impl TransportRegistry {
@@ -64,7 +69,7 @@ impl TransportRegistry {
         compiler: PromptCompiler,
         web_cache: WebCache,
     ) -> Self {
-        Self::build(store, provider, compiler, web_cache, None, None)
+        Self::build(store, provider, compiler, web_cache, None)
     }
 
     /// 附带本地 rules 目录的构造;编译请求上下文时会合并该目录下的 md 规则。
@@ -79,27 +84,18 @@ impl TransportRegistry {
             provider,
             compiler,
             WebCache::default(),
-            None,
             Some(local_rules_dir),
         )
     }
 
-    pub fn with_plugins(
+    pub fn with_web_cache_and_local_rules(
         store: Store,
         provider: Arc<dyn Provider>,
         compiler: PromptCompiler,
         web_cache: WebCache,
-        plugins: PluginRegistry,
         local_rules_dir: std::path::PathBuf,
     ) -> Self {
-        Self::build(
-            store,
-            provider,
-            compiler,
-            web_cache,
-            Some(plugins),
-            Some(local_rules_dir),
-        )
+        Self::build(store, provider, compiler, web_cache, Some(local_rules_dir))
     }
 
     fn build(
@@ -107,7 +103,6 @@ impl TransportRegistry {
         provider: Arc<dyn Provider>,
         compiler: PromptCompiler,
         web_cache: WebCache,
-        plugins: Option<PluginRegistry>,
         local_rules_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
@@ -116,6 +111,8 @@ impl TransportRegistry {
                 next_local_generation: AtomicU64::new(1),
                 upstream: Mutex::new(HashMap::new()),
                 route_changed: Notify::new(),
+                runtime_rejections: Mutex::new(HashMap::new()),
+                runtime_compatibility: RuntimeCompatibility::default(),
                 traces: CursorTraceService::new(store.clone()),
                 conversations: ConversationRegistry::new(
                     store.clone(),
@@ -126,9 +123,33 @@ impl TransportRegistry {
                 ),
                 store,
                 web_cache,
-                plugins,
             }),
         }
+    }
+
+    pub fn runtime_compatibility(&self) -> &RuntimeCompatibility {
+        &self.inner.runtime_compatibility
+    }
+
+    // RunSSE can arrive before or after the rejected append. Keep a bounded,
+    // short-lived terminal route so neither ordering waits forever for a model.
+    pub async fn reject_runtime(&self, request_id: &str) {
+        const MAX_REJECTIONS: usize = 128;
+        self.inner.runtime_compatibility.report_mismatch();
+        let mut rejected = self.inner.runtime_rejections.lock().await;
+        rejected.retain(|_, detected| detected.elapsed() < Duration::from_secs(300));
+        if !rejected.contains_key(request_id) && rejected.len() >= MAX_REJECTIONS {
+            if let Some(oldest) = rejected
+                .iter()
+                .min_by_key(|(_, time)| **time)
+                .map(|(id, _)| id.clone())
+            {
+                rejected.remove(&oldest);
+            }
+        }
+        rejected.insert(request_id.into(), Instant::now());
+        drop(rejected);
+        self.inner.route_changed.notify_waiters();
     }
 
     pub fn store(&self) -> &Store {
@@ -144,10 +165,6 @@ impl TransportRegistry {
 
     pub fn web_cache(&self) -> &WebCache {
         &self.inner.web_cache
-    }
-
-    pub fn plugins(&self) -> Option<&PluginRegistry> {
-        self.inner.plugins.as_ref()
     }
 
     pub fn conversations(&self) -> &ConversationRegistry {
@@ -169,6 +186,11 @@ impl TransportRegistry {
                 return Ok(transport.handle.clone());
             }
         }
+        self.inner
+            .runtime_rejections
+            .lock()
+            .await
+            .remove(request_id);
         local.remove(request_id);
         let (commands, receiver) = mpsc::channel(128);
         let output = Arc::new(OutputHub::default());
@@ -220,6 +242,11 @@ impl TransportRegistry {
     }
 
     pub async fn mark_upstream(&self, request_id: &str) {
+        self.inner
+            .runtime_rejections
+            .lock()
+            .await
+            .remove(request_id);
         let mut upstream = self.inner.upstream.lock().await;
         let generation = upstream.get(request_id).copied().unwrap_or_default() + 1;
         upstream.insert(request_id.into(), generation);
@@ -242,6 +269,16 @@ impl TransportRegistry {
             if let Some(generation) = self.inner.upstream.lock().await.get(request_id).copied() {
                 return TransportRoute::Upstream(generation);
             }
+            if self
+                .inner
+                .runtime_rejections
+                .lock()
+                .await
+                .get(request_id)
+                .is_some_and(|detected| detected.elapsed() < Duration::from_secs(300))
+            {
+                return TransportRoute::RuntimeRejected;
+            }
             changed.await;
         }
     }
@@ -260,6 +297,7 @@ impl TransportRegistry {
         self.inner.conversations.shutdown().await;
         let handles = std::mem::take(&mut *self.inner.local.lock().await);
         self.inner.upstream.lock().await.clear();
+        self.inner.runtime_rejections.lock().await.clear();
         for transport in handles.into_values() {
             transport.handle.disconnect().await;
             let _ = tokio::time::timeout(

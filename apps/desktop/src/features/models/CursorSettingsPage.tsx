@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api, configuredPluginModels, type Model, type ModelInput } from "../../shared/api";
+import { api, type Model, type ModelInput } from "../../shared/api";
 import { CursorCaGate, CursorCaProvider, CursorModelGate, CursorModelProvider } from "./CursorGates";
 import { CursorModelCards, cursorModelGroups, type CursorModelGroup, type CursorModelGrouping } from "./CursorModelCards";
 import { CursorModelEditor, emptyCursorModelDraft, type CursorModelDraft } from "./CursorModelEditor";
@@ -8,6 +7,7 @@ import { CursorModelTestResult, type CursorModelTestState } from "./CursorModelT
 import styles from "./CursorSettings.module.scss";
 import { PageContent } from "../../shell/layout/PageContent";
 import { LegacyModelImport } from "./LegacyModelImport";
+import { RuntimeCompatibilityNotice } from "./RuntimeCompatibilityNotice";
 import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { FormField, SecretTextInput, TextInput } from "../../shared/ui/FormControls";
 import controls from "../../shared/ui/Controls.module.scss";
@@ -21,8 +21,7 @@ import { PageActions } from "../../shell/PageActions";
 import { appStore, useAppStore } from "../../shared/store/appStore";
 
 export function CursorSettingsPage() {
-  const { models, cursorHarness, cursorBusy, plugins } = useAppStore();
-  const navigate = useNavigate();
+  const { models, cursorHarness, cursorBusy, cursorRuntime } = useAppStore();
   const message = useMessage();
   const [draft, setDraft] = useState<CursorModelDraft | null>(null);
   const [editing, setEditing] = useState<Model | null>(null);
@@ -46,11 +45,7 @@ export function CursorSettingsPage() {
   const caReady = cursorHarness?.ca === "ready";
   const cursorTakenOver = cursorHarness?.settings_applied ?? false;
   const takeoverLabel = cursorTakenOver ? t("关闭接管Cursor") : t("开启接管Cursor");
-  const pluginModels = configuredPluginModels(plugins);
-  const testTargets = [
-    ...models.map((model) => ({ model_hash: model.model_hash, display_name: model.display_name })),
-    ...pluginModels.map((model) => ({ model_hash: model.id, display_name: model.displayName })),
-  ];
+  const testTargets = models.map((model) => ({ model_hash: model.model_hash, display_name: model.display_name }));
   const providerGroups = cursorModelGroups(models, "provider");
   const typeGroups = cursorModelGroups(models, "type");
   const canGroupByProvider = providerGroups.length > 1;
@@ -260,7 +255,6 @@ export function CursorSettingsPage() {
 
   const list = <CursorModelCards
     models={models}
-    pluginModels={pluginModels}
     grouping={grouping}
     disabled={cursorBusy}
     testingModelHashes={testingModelHashes}
@@ -269,8 +263,6 @@ export function CursorSettingsPage() {
     onEdit={openEdit}
     onDuplicate={(model) => void duplicateModel(model)}
     onDelete={setDeleting}
-    onTestPluginModel={(model) => void testModel({ model_hash: model.id, display_name: model.displayName })}
-    onPluginSettings={() => navigate("/plugins")}
     onReorder={reorderModels}
     onGroupSettings={openGroupSettings}
   />;
@@ -284,21 +276,22 @@ export function CursorSettingsPage() {
     setCaCommand(null);
     setWaitingForCaRefresh(true);
   };
-  const content = <CursorCaProvider><CursorCaGate busy={cursorBusy} waitingForRefresh={waitingForCaRefresh} onInitialize={() => void initializeCa()} onRefresh={() => void refreshCa()}>
-    <div className={styles.page}>
+  const hasRuntimeMismatch = Boolean(cursorRuntime && cursorRuntime.mismatch_count > 0);
+  const content = <div className={styles.page}>
+    {hasRuntimeMismatch && <RuntimeCompatibilityNotice />}
+    <CursorCaProvider><CursorCaGate busy={cursorBusy} waitingForRefresh={waitingForCaRefresh} onInitialize={() => void initializeCa()} onRefresh={() => void refreshCa()}>
       <LegacyModelImport>{({ busy: importingLegacyModels, previewing, open }) =>
         <CursorModelProvider><CursorModelGate busy={cursorBusy || importingLegacyModels} previewingImport={previewing} onAdd={openNew} onImport={open}>{list}</CursorModelGate></CursorModelProvider>
       }</LegacyModelImport>
-    </div>
-  </CursorCaGate></CursorCaProvider>;
+    </CursorCaGate></CursorCaProvider>
+  </div>;
 
   const editorTestState = editing ? modelTestResults.get(editing.model_hash) : undefined;
   const editorTesting = Boolean(editing && testingModelHashes.has(editing.model_hash));
   const activeGroups = grouping === "provider" ? providerGroups : typeGroups;
-  const pluginSectionHeight = pluginModels.length > 0 ? 60 + pluginModels.length * 56 : 0;
   const estimatedModelHeight = grouping === "flat"
-    ? Math.max(380, Math.ceil(models.length / 3) * 196 + pluginSectionHeight)
-    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20 + pluginSectionHeight);
+    ? Math.max(380, Math.ceil(models.length / 3) * 196)
+    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20);
 
   return <>
     <PageActions position="left">
@@ -324,7 +317,9 @@ export function CursorSettingsPage() {
       </div>
     </PageActions>
     <PageActions><TooltipTrigger label={caReady ? t("添加模型") : t("请先初始化 CA")}><button className={controls.iconButton} aria-label={t("添加模型")} disabled={!caReady || cursorBusy} onClick={openNew}><Icon icon={addIcon} size="1.1em" /></button></TooltipTrigger></PageActions>
-    <PageContent title="Cursor" sections={[{ key: "cursor-settings", estimatedHeight: estimatedModelHeight, content }]} />
+    <PageContent title="Cursor" sections={[
+      { key: "cursor-settings", estimatedHeight: estimatedModelHeight + (hasRuntimeMismatch ? 280 : 0), content },
+    ]} />
     <ConfirmDialog
       open={confirmDisableTakeover}
       title={t("关闭接管Cursor？")}

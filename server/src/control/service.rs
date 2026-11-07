@@ -12,12 +12,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::ads::{
-    AdDismissalInput, AdRuntime, ADS_ENDPOINT, APP_VERSION_HEADER, DEVICE_ID_HEADER,
-    DISABLED_AD_IDS_HEADER, LANGUAGE_HEADER, OS_HEADER,
-};
-
 use crate::{
+    cursor::services::runtime_compatibility::RuntimeCompatibility,
     local_app::CursorHarness,
     model::{
         ContentPart, CursorRunTraceArtifact, CursorRunTraceSummary, LlmCallRequest,
@@ -25,7 +21,6 @@ use crate::{
         ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent, ProjectedMessage,
         PromptSpec, ProviderType, Role,
     },
-    plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
         CommitSettings, DesktopSettings, ExternalApiSettings, PortSettings, ProxySettings,
@@ -38,11 +33,9 @@ use crate::{
 pub struct ControlService {
     store: Store,
     cursor_harness: CursorHarness,
+    runtime_compatibility: RuntimeCompatibility,
     provider: Arc<dyn Provider>,
-    plugin_runtime: PluginRuntime,
-    plugins: PluginRegistry,
     clients: crate::network::NetworkClients,
-    app_version: String,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
 }
 
@@ -151,198 +144,25 @@ impl ControlService {
     pub fn new(
         store: Store,
         provider: Arc<dyn Provider>,
-        plugin_runtime: PluginRuntime,
-        plugins: PluginRegistry,
         clients: crate::network::NetworkClients,
-        app_version: String,
+        runtime_compatibility: RuntimeCompatibility,
     ) -> Result<Self> {
         Ok(Self {
             cursor_harness: CursorHarness::new(store.clone())?,
+            runtime_compatibility,
             store,
             provider,
-            plugin_runtime,
-            plugins,
             clients,
-            app_version,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
+    pub fn runtime_compatibility(&self) -> &RuntimeCompatibility {
+        &self.runtime_compatibility
+    }
+
     pub fn cursor_harness(&self) -> &CursorHarness {
         &self.cursor_harness
-    }
-
-    pub async fn plugins(&self) -> Vec<PluginDescriptor> {
-        self.plugins.plugins().await
-    }
-
-    pub async fn plugin_oauth_begin(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        method_id: &str,
-    ) -> Result<crate::plugin::OAuthBeginResponse> {
-        self.plugins
-            .oauth_begin(plugin_id, resource_type, method_id)
-            .await
-    }
-
-    pub async fn plugin_oauth_poll(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::plugin::OAuthPollResponse> {
-        self.plugins.oauth_poll(session_id).await
-    }
-
-    pub async fn plugin_import(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        files: serde_json::Value,
-    ) -> Result<crate::plugin::ImportResponse> {
-        self.plugins
-            .import_resources(plugin_id, resource_type, files)
-            .await
-    }
-
-    pub async fn plugin_export_resources(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .export_resources(plugin_id, resource_type)
-            .await
-    }
-
-    pub async fn plugin_refresh_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .refresh_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_resource_action(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-        action_id: &str,
-        input: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .resource_action(plugin_id, resource_type, resource_id, action_id, input)
-            .await
-    }
-
-    pub async fn plugin_delete_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .delete_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_sync_models(&self, plugin_id: &str, provider_id: &str) -> Result<usize> {
-        self.plugins.sync_models(plugin_id, provider_id).await
-    }
-
-    pub async fn plugin_set_model_enabled(
-        &self,
-        plugin_id: &str,
-        provider_id: &str,
-        model_id: &str,
-        enabled: bool,
-    ) -> Result<()> {
-        self.plugins
-            .set_model_enabled(plugin_id, provider_id, model_id, enabled)
-            .await
-    }
-
-    pub async fn remove_plugin_configuration(&self, plugin_id: &str) -> Result<()> {
-        self.plugins.remove(plugin_id).await
-    }
-
-    pub fn plugin_runtime_status(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.status()
-    }
-
-    pub fn initialize_plugin_runtime(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.initialize(self.store.clone())
-    }
-
-    pub fn cancel_plugin_runtime_initialization(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.cancel_initialization()
-    }
-
-    pub(super) async fn ads(
-        &self,
-        disabled_ad_ids: Option<&str>,
-        language: &str,
-    ) -> Result<AdRuntime> {
-        let client = self.clients.default_client().await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut request = client
-            .get(ADS_ENDPOINT)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, &self.app_version)
-            .header(LANGUAGE_HEADER, language)
-            .timeout(std::time::Duration::from_secs(60));
-        if let Some(disabled_ad_ids) = disabled_ad_ids.filter(|value| !value.is_empty()) {
-            request = request.header(DISABLED_AD_IDS_HEADER, disabled_ad_ids);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement service failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        let mut runtime = response.json::<AdRuntime>().await?.into_menu_slots()?;
-        runtime.cache_images(&client).await;
-        Ok(runtime)
-    }
-
-    pub(super) async fn dismiss_ad(&self, ad_id: &str, input: &AdDismissalInput) -> Result<()> {
-        let client = self.clients.default_client().await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut endpoint = Url::parse(ADS_ENDPOINT).map_err(|error| {
-            Error::Config(format!("advertisement endpoint is invalid: {error}"))
-        })?;
-        endpoint.set_query(None);
-        endpoint
-            .path_segments_mut()
-            .map_err(|_| Error::Config("advertisement endpoint cannot contain an ad id".into()))?
-            .push(ad_id)
-            .push("dismissals");
-        let response = client
-            .post(endpoint)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, &self.app_version)
-            .json(input)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement dismissal failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        Ok(())
     }
 
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
@@ -425,19 +245,13 @@ impl ControlService {
         const TEST_PROMPT: &str = "Output the numbers 1 through 120 separated by a single space. No commas, no newlines, no explanation.";
 
         let mut model = ModelSpec::new(model_hash);
-        if model_hash.starts_with(crate::plugin::ADAPTER_ID_PREFIX) {
-            let descriptor = self.plugins.model_descriptor(model_hash).await?;
-            model.display_name = Some(descriptor.display_name);
-            model.max_output_tokens = Some(descriptor.max_output_tokens.unwrap_or(65_536));
-        } else {
-            let configured = self
-                .store
-                .model(model_hash)
-                .await?
-                .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
-            configured.configure(&mut model);
-            model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
-        }
+        let configured = self
+            .store
+            .model(model_hash)
+            .await?
+            .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
+        configured.configure(&mut model);
+        model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
         let call_id = format!("model-test-{}", uuid::Uuid::new_v4());
         let invocation = ModelInvocation {
             call_id: call_id.clone(),
@@ -886,11 +700,6 @@ async fn discover_models_from_endpoint(
         }
         ProviderType::Anthropic => {
             anthropic_models(client, base_url, api_key, custom_headers).await?
-        }
-        ProviderType::Plugin => {
-            return Err(Error::Config(
-                "plugin providers discover models through their plugin".into(),
-            ))
         }
     };
     models.sort();

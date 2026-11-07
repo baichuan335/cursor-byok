@@ -44,7 +44,7 @@ export function ExternalApiSettingsCard({ servicePort }: { servicePort: number }
       <div className={styles.row}>
         <div className={styles.description}>
           <strong>{t("开启外部 API")}</strong>
-          <small>{t("允许本机应用使用密钥调用已配置的模型，包括插件模型。")}</small>
+          <small>{t("允许本机应用使用密钥调用已配置的模型。")}</small>
         </div>
         <Switch label={t("开启外部 API")} checked={draft.enabled} disabled={!saved || saving}
           onChange={(enabled) => setDraft((current) => ({ ...current, enabled }))} />

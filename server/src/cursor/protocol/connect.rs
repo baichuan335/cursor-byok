@@ -11,6 +11,7 @@ pub const END_STREAM_FLAG: u8 = 0x02;
 pub enum ConnectCode {
     Canceled,
     InvalidArgument,
+    PermissionDenied,
     NotFound,
     Unavailable,
     Internal,
@@ -21,6 +22,7 @@ impl ConnectCode {
         match self {
             Self::Canceled => "canceled",
             Self::InvalidArgument => "invalid_argument",
+            Self::PermissionDenied => "permission_denied",
             Self::NotFound => "not_found",
             Self::Unavailable => "unavailable",
             Self::Internal => "internal",
