@@ -42,7 +42,7 @@ Cursor BYOK combines a local Rust gateway with a React / Tauri desktop managemen
 - An installed Cursor client; model API use requires a reachable provider endpoint and appropriate credentials.
 - The current derivative version is **1.0.2**. A Windows 11 x64 NSIS installer has been built locally.
 - The Windows desktop app requires WebView2 Runtime; install it through a trusted Microsoft channel if missing.
-- The project contains macOS and Linux platform code, but this maintained version has not completed build and runtime acceptance testing on those platforms. Corresponding installers are not guaranteed to be available.
+- Version 1.0.2 now includes GitHub Actions-built macOS Apple Silicon / Intel DMG installers and Linux x64 DEB / AppImage packages. Real-device, Cursor conversation, and automatic-update end-to-end acceptance testing remain incomplete. Mac builds are ad-hoc signed, without Apple Developer signing or notarization, and may trigger system security warnings.
 
 ### Get an installer
 
@@ -52,7 +52,7 @@ Cursor BYOK combines a local Rust gateway with a React / Tauri desktop managemen
 4. If this repository does not yet provide the asset you need, build from source below. A source version number or successful local build does not mean a GitHub Release has been published.
 
 > [!WARNING]
-> **Update signing configuration has been migrated; existing installers do not change with source edits.** Current source uses this maintainer's update public key, with both the standard and Windows portable update manifests pointing to this repository. The previously released 1.0.2 installer still contains the old configuration. Install the first build using the new configuration manually before relying on later maintained updates. No newly signed update release has been published yet, and end-to-end download, signature verification, and installation remain unverified. Tauri update signing is separate from Windows code signing or Apple signing and notarization.
+> **Update signing configuration has been migrated; existing installers do not change with source edits.** Current source uses this maintainer's update public key, with both the standard and Windows portable update manifests pointing to this repository. The previously released 1.0.2 installer still contains the old configuration. Install the first build using the new configuration manually before relying on later maintained updates. The supplemental 1.0.2 Mac/Linux packages contain the new configuration and corresponding Tauri update signatures, but no automatic-update manifest was published with these additions. Install manually; end-to-end automatic download, signature verification, and installation remain unverified. Per-platform BUILD-*.txt files record the supplemental source, while the original version tag is unchanged. Tauri update signing is separate from Windows code signing or Apple signing and notarization.
 
 Upgrades do not actively remove old plugin credentials, advertisement caches, or historical call records; the new version no longer uses resources dedicated to removed features. If Commit settings previously selected a plugin model, choose an existing model or **Direct** in **System settings → Commit Settings** and save. An invalid old selection will not silently switch to a potentially billable official service.
 
@@ -181,6 +181,12 @@ On Windows, Git CRLF checkout can cause the `every_captured_mode_owns_and_render
 
 The repository retains a `Makefile`, but the Windows instructions above do not require Make. macOS/Linux desktop builds need their own Tauri dependencies and signing setup; the Windows command that only builds NSIS packages does not validate those platforms.
 
+### Add Mac / Linux installers to an existing version
+
+Maintainers can manually run **Supplement desktop installers** in GitHub Actions with an existing release version (without `v`) and a full source commit SHA already contained in `main`. The workflow checks the source version, builds macOS Apple Silicon, macOS Intel, and Linux x64 installers, then adds assets to the existing Release only after all builds and SHA-256 checks succeed.
+
+This does not bump the version, move its tag, or overwrite the original Windows installer, checksum file, or update manifests. Each supplemental build records its source in a `BUILD-*.txt` asset. Existing asset name collisions stop the upload rather than overwriting files. Mac builds are ad-hoc signed, without Apple Developer signing or notarization. A successful build is not real-device or Cursor conversation acceptance testing.
+
 ## Project structure
 
 ```text
@@ -199,7 +205,7 @@ cursor-byok/
 
 Report problems in [this repository's Issues](https://github.com/baichuan335/cursor-byok/issues) or submit a [Pull Request](https://github.com/baichuan335/cursor-byok/pulls). Include your operating system, Cursor and Cursor BYOK versions, model protocol, minimal reproduction steps, and sanitized error logs. Do not disclose credentials, private code, or conversation contents.
 
-Update endpoints and the public key have been migrated in current source; the tutorial entry and default public TAB service still use upstream settings. A newly signed update release and actual automatic upgrades still require separate verification. Treat the current source, actual builds, and this repository's release notes as the record of available features, not planned work.
+Update endpoints and the public key have been migrated in current source; the tutorial entry and default public TAB service still use upstream settings. Supplemental platform installers are published; actual automatic upgrades still require separate verification. Treat the current source, actual builds, and this repository's release notes as the record of available features, not planned work.
 
 ## Authors, origin, and license
 
