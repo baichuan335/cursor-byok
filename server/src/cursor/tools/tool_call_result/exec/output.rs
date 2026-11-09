@@ -408,7 +408,7 @@ fn read_mcp(value: &pb::ReadMcpResourceExecResult) -> Result<(String, bool)> {
 fn task(value: &pb::SubagentResult, call: &ToolCall) -> Result<(String, bool)> {
     use pb::subagent_result::Result as R;
     match value.result.as_ref().ok_or_else(|| missing("subagent"))? {
-        R::Success(value) if creates_subagent(call) => {
+        R::Success(value) if creates_subagent(call) || super::task_is_background(value, call) => {
             let name = call
                 .arguments
                 .get("description")
@@ -418,14 +418,28 @@ fn task(value: &pb::SubagentResult, call: &ToolCall) -> Result<(String, bool)> {
             if value.agent_id.is_empty() {
                 return Err(Error::Protocol("Task result is missing agent_id".into()));
             }
-            let identity = format!("Subagent name: {name}\nSubagent ID: {}", value.agent_id);
-            let content = value
+            let mut content = format!("Subagent name: {name}\nSubagent ID: {}", value.agent_id);
+            if super::task_is_background(value, call) {
+                // A spawn/resume acknowledgement is not the child's final result.
+                content.push_str(
+                    "\nStatus: running in background\n\n\
+                     This acknowledges background execution, not a completed task result. \
+                     Wait for a completion notification after ending the current response. \
+                     Do not use resume to poll for progress or results; it sends a new follow-up \
+                     and is rejected while the subagent is running. Continue independent work \
+                     or finish this response and wait for the notification. Do not retry a rejected \
+                     resume until completion, and do not set interrupt=true unless the user \
+                     explicitly asks to interrupt the running task.",
+                );
+            }
+            if let Some(message) = value
                 .final_message
                 .as_deref()
                 .filter(|message| !message.is_empty())
-                .map_or(identity.clone(), |message| {
-                    format!("{identity}\n\n{message}")
-                });
+            {
+                content.push_str("\n\n");
+                content.push_str(message);
+            }
             Ok((content, false))
         }
         R::Success(value) => Ok((value.final_message.clone().unwrap_or_default(), false)),

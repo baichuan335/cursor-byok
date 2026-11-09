@@ -43,9 +43,8 @@ pub struct ExecContext {
     pub conversation_id: String,
     pub root_conversation_id: String,
     pub default_subagent_model: String,
-    pub subagent_model: Option<SubagentModel>,
+    pub subagent_models: HashMap<String, SubagentModel>,
     pub allow_subagents: bool,
-    pub subagents_disabled: bool,
     pub terminals_folder: String,
     pub admin_command_denylist: Vec<String>,
     pub mcp_routes: HashMap<(String, String), McpRoute>,
@@ -70,7 +69,10 @@ impl ExecContext {
         if !call.name.eq_ignore_ascii_case("Task") {
             return false;
         }
-        self.subagents_disabled || matches!(self.subagent_model, Some(SubagentModel::Disabled))
+        matches!(
+            self.subagent_models.get(task_type(call)),
+            Some(SubagentModel::Disabled)
+        )
     }
 
     pub fn prepare_call(&self, call: &ToolCall) -> Result<ToolCall> {
@@ -81,24 +83,30 @@ impl ExecContext {
             .arguments
             .as_object()
             .ok_or_else(|| Error::Protocol("Task arguments must be a JSON object".into()))?;
-        let subagent_type = arguments
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("generalPurpose");
+        let subagent_type = task_type(call);
         if self.task_disabled(call) {
             return Ok(call.clone());
         }
-        let model = match &self.subagent_model {
-            Some(SubagentModel::Model(model)) => model.clone(),
-            Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
-            None => arguments
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .filter(|model| *model != "inherit")
-                .unwrap_or(&self.default_subagent_model)
-                .to_string(),
+        // An existing child retains its own model; an empty slug lets Cursor resolve it.
+        let resuming = arguments
+            .get("resume")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty() && id != "self");
+        let model = if resuming {
+            String::new()
+        } else {
+            match self.subagent_models.get(subagent_type) {
+                Some(SubagentModel::Model(model)) => model.clone(),
+                Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
+                None => arguments
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|model| !model.is_empty() && *model != "inherit")
+                    .unwrap_or(&self.default_subagent_model)
+                    .to_string(),
+            }
         };
-        if model.is_empty() {
+        if !resuming && model.is_empty() {
             return Err(Error::Protocol(format!(
                 "Task subagent type {subagent_type} has no model"
             )));
@@ -109,8 +117,24 @@ impl ExecContext {
             .as_object_mut()
             .expect("Task arguments were validated")
             .insert("model".into(), serde_json::Value::String(model));
+        prepared
+            .arguments
+            .as_object_mut()
+            .expect("Task arguments were validated")
+            .insert(
+                "subagent_type".into(),
+                serde_json::Value::String(subagent_type.into()),
+            );
         Ok(prepared)
     }
+}
+
+fn task_type(call: &ToolCall) -> &str {
+    call.arguments
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("generalPurpose")
 }
 
 pub(crate) struct PendingInteraction {

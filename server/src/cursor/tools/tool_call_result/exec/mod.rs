@@ -14,6 +14,16 @@ use crate::cursor::tools::{
     runtime::{ExecStage, PendingExec},
 };
 
+/// Keep model-facing Task acknowledgements aligned with Cursor's background state.
+fn task_is_background(success: &pb::SubagentSuccess, call: &crate::model::ToolCall) -> bool {
+    success.background_reason != pb::SubagentBackgroundReason::Unspecified as i32
+        || call
+            .arguments
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 pub(crate) fn from_exec(
     pending: PendingExec,
     wire_result: &pb::exec_client_message::Message,

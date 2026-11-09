@@ -129,37 +129,56 @@ pub fn request(id: u32, call: &ToolCall, context: &ExecContext) -> Result<pb::Ag
                 .into(),
             tool_call_id: call.call_id.clone(),
         }),
-        "task" => Message::SubagentArgs(pb::SubagentArgs {
-            tool_call_id: call.call_id.clone(),
-            subagent_type: optional_string("subagent_type").unwrap_or_default(),
-            model_id: string("model")?,
-            prompt: string("prompt")?,
-            readonly: false,
-            resume_agent_id: optional_string("resume"),
-            run_in_background: call
-                .arguments
-                .get("run_in_background")
-                .and_then(Value::as_bool),
-            continuation_config: None,
-            parent_conversation_id: Some(context.conversation_id.clone()),
-            interrupt: call.arguments.get("interrupt").and_then(Value::as_bool),
-            mode: 0,
-            fork_agent_id: None,
-            root_parent_conversation_id: Some(context.root_conversation_id.clone()),
-            selected_context: task_attachments(call),
-            direct_meta_parent_child_subagent: None,
-            environment: match optional_string("environment").as_deref() {
-                Some("cloud") => pb::SubagentExecutionEnvironment::Cloud as i32,
-                Some("local") | None => pb::SubagentExecutionEnvironment::Local as i32,
+        "task" => {
+            let (resume_agent_id, fork_agent_id) = match optional_string("resume").as_deref() {
+                // Cursor clones the fork source's history; `self` is the current
+                // conversation, which can differ from the root for nested Tasks.
+                Some("self") => (None, Some(context.conversation_id.clone())),
+                Some(agent_id) => (Some(agent_id.to_string()), None),
+                None => (None, None),
+            };
+            let environment = match optional_string("environment").as_deref() {
+                Some("cloud") => pb::SubagentExecutionEnvironment::Cloud,
+                Some("local") | None => pb::SubagentExecutionEnvironment::Local,
                 Some(value) => {
                     return Err(Error::Protocol(format!(
                         "unknown Task environment: {value}"
                     )))
                 }
-            },
-            cloud_base_branch: optional_string("cloud_base_branch"),
-            credentials: None,
-        }),
+            };
+            if environment == pb::SubagentExecutionEnvironment::Cloud && fork_agent_id.is_some() {
+                // Match Cursor's createOrResumeCloudSubagent rejection, never
+                // silently change the requested execution environment to local.
+                return Err(Error::Protocol(
+                    "environment: \"cloud\" does not support forkAgentId/resume=\"self\" yet."
+                        .into(),
+                ));
+            }
+            Message::SubagentArgs(pb::SubagentArgs {
+                tool_call_id: call.call_id.clone(),
+                subagent_type: optional_string("subagent_type")
+                    .unwrap_or_else(|| "generalPurpose".into()),
+                model_id: string("model")?,
+                prompt: string("prompt")?,
+                readonly: false,
+                resume_agent_id,
+                run_in_background: call
+                    .arguments
+                    .get("run_in_background")
+                    .and_then(Value::as_bool),
+                continuation_config: None,
+                parent_conversation_id: Some(context.conversation_id.clone()),
+                interrupt: call.arguments.get("interrupt").and_then(Value::as_bool),
+                mode: 0,
+                fork_agent_id,
+                root_parent_conversation_id: Some(context.root_conversation_id.clone()),
+                selected_context: task_attachments(call),
+                direct_meta_parent_child_subagent: None,
+                environment: environment as i32,
+                cloud_base_branch: optional_string("cloud_base_branch"),
+                credentials: None,
+            })
+        }
         "fetchmcpresource" => Message::ReadMcpResourceExecArgs(pb::ReadMcpResourceExecArgs {
             server: string("server")?,
             uri: string("uri")?,

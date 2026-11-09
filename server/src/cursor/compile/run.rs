@@ -145,12 +145,7 @@ pub(crate) async fn prepare(
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;
-    let subagents_disabled = subagent_model_overrides
-        .first()
-        .is_some_and(|(_, selection)| {
-            matches!(selection, crate::model::SubagentModelOverride::Disabled)
-        });
-    let mut checkpoint_prompt = compiler.prompt_spec(
+    let checkpoint_prompt = compiler.prompt_spec(
         checkpoint_mode,
         &model,
         &dynamic
@@ -159,9 +154,7 @@ pub(crate) async fn prepare(
             .collect::<Vec<_>>(),
         request.suppress_subagent_progress_update_tool == Some(true),
     )?;
-    if subagents_disabled {
-        checkpoint_prompt.tools.retain(|tool| tool.name != "Task");
-    }
+    // Per-type model policies are enforced when Task is dispatched, not globally.
     let prompt = if compacting {
         compiler.prompt_spec(Mode::Compaction, &model, &[], false)?
     } else {
@@ -325,7 +318,6 @@ pub(crate) async fn prepare(
         &request_context,
         &conversation_id,
         &model.model_id,
-        subagents_disabled,
         &subagent_model_overrides,
     );
     Ok((
@@ -580,19 +572,30 @@ fn exec_context(
     request_context: &pb::RequestContext,
     conversation_id: &ConversationId,
     model_id: &str,
-    subagents_disabled: bool,
     overrides: &[(
         crate::model::SubagentKind,
         crate::model::SubagentModelOverride,
     )],
 ) -> ExecContext {
-    let subagent_model = overrides.first().map(|(_, value)| match value {
-        crate::model::SubagentModelOverride::Explicit(model) => {
-            SubagentModel::Model(model.model_id.clone())
-        }
-        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model_id.into()),
-        crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
-    });
+    let subagent_models = overrides
+        .iter()
+        .map(|(kind, value)| {
+            let name = match kind {
+                crate::model::SubagentKind::GeneralPurpose => "generalPurpose".into(),
+                crate::model::SubagentKind::Named(name) => name.clone(),
+            };
+            let model = match value {
+                crate::model::SubagentModelOverride::Explicit(model) => {
+                    SubagentModel::Model(model.model_id.clone())
+                }
+                crate::model::SubagentModelOverride::Inherit => {
+                    SubagentModel::Model(model_id.into())
+                }
+                crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
+            };
+            (name, model)
+        })
+        .collect();
     ExecContext {
         conversation_id: conversation_id.to_string(),
         root_conversation_id: request
@@ -600,9 +603,8 @@ fn exec_context(
             .clone()
             .unwrap_or_else(|| conversation_id.to_string()),
         default_subagent_model: model_id.into(),
-        subagent_model,
-        allow_subagents: request.subagent_type_name.is_none() && !subagents_disabled,
-        subagents_disabled,
+        subagent_models,
+        allow_subagents: request.subagent_type_name.is_none(),
         terminals_folder: request_context
             .env
             .as_ref()
@@ -610,5 +612,131 @@ fn exec_context(
             .unwrap_or_default(),
         admin_command_denylist: request_context.admin_command_denylist.clone(),
         mcp_routes: context::meta_mcp_routes(request_context),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn task(kind: Option<&str>, resume: Option<&str>) -> crate::model::ToolCall {
+        let mut arguments = json!({"description": "Inspect", "prompt": "Inspect the code"});
+        if let Some(kind) = kind {
+            arguments["subagent_type"] = json!(kind);
+        }
+        if let Some(resume) = resume {
+            arguments["resume"] = json!(resume);
+        }
+        crate::model::ToolCall {
+            index: 0,
+            call_id: "task-call".into(),
+            model_call_id: "model-call".into(),
+            name: "Task".into(),
+            arguments_text: arguments.to_string(),
+            arguments,
+            argument_error: None,
+        }
+    }
+
+    fn task_context(overrides: Vec<pb::SubagentModelOverride>) -> ExecContext {
+        let request = pb::AgentRunRequest {
+            subagent_model_overrides: overrides,
+            ..Default::default()
+        };
+        let overrides = model::overrides(&request).unwrap();
+        exec_context(
+            &request,
+            &pb::RequestContext::default(),
+            &ConversationId::new("parent"),
+            "parent-model",
+            &overrides,
+        )
+    }
+
+    fn explicit(kind: &str, model: &str) -> pb::SubagentModelOverride {
+        pb::SubagentModelOverride {
+            subagent_type: kind.into(),
+            selection: Some(pb::subagent_model_override::Selection::Model(
+                pb::RequestedModel {
+                    model_id: model.into(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn subagent_models_are_selected_by_type_not_list_order() {
+        for overrides in [
+            vec![
+                explicit("explore", "explore-model"),
+                explicit("generalPurpose", "general-model"),
+            ],
+            vec![
+                explicit("generalPurpose", "general-model"),
+                explicit("explore", "explore-model"),
+            ],
+        ] {
+            let context = task_context(overrides);
+            assert_eq!(
+                context
+                    .prepare_call(&task(Some("explore"), None))
+                    .unwrap()
+                    .arguments["model"],
+                "explore-model"
+            );
+            let general = context.prepare_call(&task(None, None)).unwrap();
+            assert_eq!(general.arguments["model"], "general-model");
+            assert_eq!(general.arguments["subagent_type"], "generalPurpose");
+            assert_eq!(
+                context
+                    .prepare_call(&task(Some("shell"), None))
+                    .unwrap()
+                    .arguments["model"],
+                "parent-model"
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_one_subagent_type_does_not_disable_the_others() {
+        let context = task_context(vec![pb::SubagentModelOverride {
+            subagent_type: "explore".into(),
+            selection: Some(pb::subagent_model_override::Selection::Disabled(true)),
+        }]);
+        assert!(context.task_disabled(&task(Some("explore"), None)));
+        assert!(!context.task_disabled(&task(None, None)));
+        assert!(!context.task_disabled(&task(Some("shell"), None)));
+    }
+
+    #[test]
+    fn subagent_inherit_is_resolved_for_its_own_type() {
+        let context = task_context(vec![
+            explicit("explore", "explore-model"),
+            pb::SubagentModelOverride {
+                subagent_type: "generalPurpose".into(),
+                selection: Some(pb::subagent_model_override::Selection::Inherit(true)),
+            },
+        ]);
+        let mut call = task(None, None);
+        call.arguments["model"] = json!("other-model");
+        assert_eq!(
+            context.prepare_call(&call).unwrap().arguments["model"],
+            "parent-model"
+        );
+    }
+
+    #[test]
+    fn resuming_a_subagent_keeps_its_existing_model() {
+        let context = task_context(vec![explicit("explore", "new-explore-model")]);
+        let call = context
+            .prepare_call(&task(Some("explore"), Some("child-id")))
+            .unwrap();
+        assert_eq!(call.arguments["model"], "");
+        let fork = context
+            .prepare_call(&task(Some("explore"), Some("self")))
+            .unwrap();
+        assert_eq!(fork.arguments["model"], "new-explore-model");
     }
 }

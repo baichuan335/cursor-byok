@@ -145,6 +145,20 @@ Check CA trust, takeover status, model test results, and the model selected in C
 
 Continue or resume in the original conversation when Cursor prompts you. If it still fails, save your work, fully quit and restart Cursor, reopen the conversation, and select the configured model again. You do not need to delete conversations or clear the database first. A diagnostic notice does not confirm successful recovery; automatic rerouting depends on client state. Compatibility is not guaranteed for every Cursor version or conversation.
 
+**How do subagents select models, resume tasks, or fork?**
+
+Subagents use the per-type model settings supplied by Cursor, defaulting to the parent model when no model is specified. Disabling one type does not disable other types. Resuming an existing subagent preserves its model. A successful background launch does not mean the task has finished: `resume` sends new work, not a progress query. The parent can continue independent work or end its response to wait for a completion notification.
+
+`Already running` means that particular resume request was rejected because the subagent was busy, not that the original task failed or that it is still running now. This historical notice can remain after the subagent finishes. Do not repeatedly resume or interrupt merely to retrieve results; interrupt only when you explicitly intend to stop the current work.
+
+Task's `resume="self"` starts a new local subagent from the current conversation history; it does not resume an agent literally named `self`. Cloud forks are currently unsupported and return an explicit error rather than silently switching to local execution. Subagent capabilities still depend on the Cursor client, account, and model compatibility. You do not need to delete a conversation before troubleshooting a failed resume.
+
+**GPT cache hit rate looks low?**
+
+The overview shows a token-weighted ratio for the selected time range and models, not the fraction of calls that hit the cache. The default formula is cached reads / (cached reads + uncached input). Standard OpenAI input counts already include cached reads; the app subtracts cached tokens before calculating uncached input to avoid double counting. Cache support and usage reporting for compatible services depend on the provider.
+
+Under **Overview → Custom**, select one model and a short time range, click **Apply**, and compare input and cached-read counts across consecutive calls in **Call history**. New tasks, long idle periods, history compaction, or changes to prompts and tools can reduce reuse; no fixed hit rate is guaranteed. To compare actual requests, briefly enable **System settings → Call observation → Detailed mode**, reproduce the issue, then turn it off. Detailed records may contain code, conversations, and tool results; sanitize them before sharing. Clearing the database or cache is unnecessary.
+
 ## Project Structure
 
 ```text

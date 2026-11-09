@@ -716,11 +716,11 @@
               "type": "string"
             },
             "resume": {
-              "description": "Optional agent ID to resume from. If provided, sends a follow-up message to the agent after it has completed. Requests to a currently running asynchronous agent fail unless `interrupt` is true; set `interrupt` to true only when you intend to interrupt the running agent. Use \"self\" to start a new agent with your own entire conversation history as a starting point (aka 'self-fork').",
+              "description": "Optional agent ID to resume from. If provided, sends a new follow-up message to the agent after it has completed; this is not a status or progress query. Do not use resume to poll a background agent. Wait for its completion notification before sending another task. Requests to a currently running asynchronous agent fail unless `interrupt` is true; do not retry that rejection or set `interrupt` merely to get results. Set `interrupt` to true only when the user explicitly asks to interrupt the running task. Use \"self\" to start a new agent with your own entire conversation history as a starting point (aka 'self-fork').",
               "type": "string"
             },
             "run_in_background": {
-              "description": "Run the agent in the background (returns output_file path to check later). If this is false, you will be blocked until the agent completes. If the user is currently in Multitask Mode, always set this parameter to True. When true, the background subagent will send a notification when it completes.",
+              "description": "Run the agent in the background. The immediate success acknowledges that it started; it is not a completed task result. Continue independent work or end the current response to receive the completion notification. Do not call resume to poll for progress or results. If this is false, you will be blocked until the agent completes unless the client moves it to the background. If the user is currently in Multitask Mode, always set this parameter to True.",
               "type": "boolean"
             },
             "subagent_type": {

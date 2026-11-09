@@ -193,7 +193,36 @@ impl ConversationRuntime {
                         }
                     }
                     TransportCommand::Append { seqno, message } => {
-                        for (_seqno, message) in inbox.push(seqno, *message) {
+                        for (seqno, mut message) in inbox.push(seqno, *message) {
+                            let is_subagent = handle.parent().is_some()
+                                || match message.message.as_ref() {
+                                    Some(pb::agent_client_message::Message::RunRequest(
+                                        request,
+                                    )) => request.subagent_type_name.is_some(),
+                                    _ => current.as_ref().is_some_and(|generation| {
+                                        generation.request.subagent_type_name.is_some()
+                                    }),
+                                };
+                            if is_subagent {
+                                let action = match message.message.as_mut() {
+                                    Some(pb::agent_client_message::Message::RunRequest(
+                                        request,
+                                    )) => request.action.as_mut(),
+                                    Some(
+                                        pb::agent_client_message::Message::ConversationAction(
+                                            action,
+                                        ),
+                                    ) => Some(action),
+                                    _ => None,
+                                };
+                                if let Some(action) = action {
+                                    compile::identify_subagent_message(
+                                        action,
+                                        handle.request_id(),
+                                        seqno,
+                                    );
+                                }
+                            }
                             {
                                 match message.message {
                                     Some(pb::agent_client_message::Message::RunRequest(

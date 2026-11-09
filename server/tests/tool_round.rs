@@ -48,11 +48,10 @@ fn exec_context() -> ExecContext {
         conversation_id: "conversation".into(),
         root_conversation_id: "conversation".into(),
         default_subagent_model: "model".into(),
-        subagent_model: None,
+        subagent_models: std::collections::HashMap::new(),
         terminals_folder: "/tmp/terminals".into(),
         admin_command_denylist: Vec::new(),
         allow_subagents: true,
-        subagents_disabled: false,
         mcp_routes: std::collections::HashMap::new(),
     }
 }
@@ -711,6 +710,136 @@ async fn tool_success_is_not_inferred_from_debug_text() {
     ));
 }
 
+fn task_request_args(arguments: serde_json::Value, context: &ExecContext) -> pb::SubagentArgs {
+    let mut task = call("call-task", "Task");
+    task.arguments = arguments;
+    let request = codec::request(7, &task, context).unwrap();
+    let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) = request.message else {
+        panic!("expected ExecServerMessage")
+    };
+    assert_eq!(exec.id, 7);
+    assert_eq!(exec.exec_id, "call-task");
+    assert_eq!(exec.accept_hook_additional_contexts, Some(false));
+    let Some(pb::exec_server_message::Message::SubagentArgs(args)) = exec.message else {
+        panic!("expected SubagentArgs")
+    };
+    args
+}
+
+#[test]
+fn task_self_resume_forks_the_current_conversation_not_the_root() {
+    for root in ["conversation", "root-conversation"] {
+        let mut context = exec_context();
+        context.root_conversation_id = root.into();
+        for environment in [None, Some("local")] {
+            let mut arguments = json!({
+                "prompt": "Inspect the current conversation",
+                "model": "fork-model",
+                "resume": "self",
+                "run_in_background": true
+            });
+            if let Some(environment) = environment {
+                arguments["environment"] = json!(environment);
+            }
+            let args = task_request_args(arguments, &context);
+            assert_eq!(args.resume_agent_id, None);
+            assert_eq!(args.fork_agent_id.as_deref(), Some("conversation"));
+            assert_eq!(args.parent_conversation_id.as_deref(), Some("conversation"));
+            assert_eq!(args.root_parent_conversation_id.as_deref(), Some(root));
+            assert_eq!(args.model_id, "fork-model");
+            assert_eq!(args.subagent_type, "generalPurpose");
+            assert_eq!(args.run_in_background, Some(true));
+            assert_eq!(
+                args.environment,
+                pb::SubagentExecutionEnvironment::Local as i32
+            );
+        }
+    }
+}
+
+#[test]
+fn task_resume_preserves_the_agent_id_and_accepts_a_prepared_empty_model() {
+    let args = task_request_args(
+        json!({
+            "prompt": "Continue the investigation",
+            "model": "",
+            "resume": "child-agent",
+            "subagent_type": "explore",
+            "interrupt": true
+        }),
+        &exec_context(),
+    );
+    assert_eq!(args.resume_agent_id.as_deref(), Some("child-agent"));
+    assert_eq!(args.fork_agent_id, None);
+    assert_eq!(args.model_id, "");
+    assert_eq!(args.subagent_type, "explore");
+    assert_eq!(args.interrupt, Some(true));
+}
+
+#[test]
+fn task_new_request_has_no_resume_or_fork_and_defaults_the_subagent_type() {
+    let args = task_request_args(
+        json!({"prompt": "Start a fresh task", "model": "new-model"}),
+        &exec_context(),
+    );
+    assert_eq!(args.resume_agent_id, None);
+    assert_eq!(args.fork_agent_id, None);
+    assert_eq!(args.subagent_type, "generalPurpose");
+    assert_eq!(args.model_id, "new-model");
+}
+
+#[test]
+fn task_cloud_self_resume_is_rejected_instead_of_downgraded_to_local() {
+    let mut task = call("call-task", "Task");
+    task.arguments = json!({
+        "prompt": "Fork this conversation in the cloud",
+        "model": "fork-model",
+        "resume": "self",
+        "environment": "cloud"
+    });
+    let error = codec::request(7, &task, &exec_context()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("environment: \"cloud\" does not support forkAgentId/resume=\"self\" yet."));
+}
+
+#[test]
+fn task_cloud_create_and_resume_preserve_the_cloud_environment() {
+    for resume in [None, Some("cloud-agent")] {
+        let mut arguments = json!({
+            "prompt": "Work in the cloud",
+            "model": if resume.is_some() { "" } else { "cloud-model" },
+            "environment": "cloud",
+            "cloud_base_branch": "main"
+        });
+        if let Some(resume) = resume {
+            arguments["resume"] = json!(resume);
+        }
+        let args = task_request_args(arguments, &exec_context());
+        assert_eq!(
+            args.environment,
+            pb::SubagentExecutionEnvironment::Cloud as i32
+        );
+        assert_eq!(args.resume_agent_id.as_deref(), resume);
+        assert_eq!(args.fork_agent_id, None);
+        assert_eq!(args.cloud_base_branch.as_deref(), Some("main"));
+    }
+}
+
+#[test]
+fn task_request_still_requires_a_string_model() {
+    for arguments in [
+        json!({"prompt": "Inspect"}),
+        json!({"prompt": "Inspect", "model": null}),
+        json!({"prompt": "Inspect", "model": 42}),
+    ] {
+        let mut task = call("call-task", "Task");
+        task.arguments = arguments;
+        let error = codec::request(7, &task, &exec_context()).unwrap_err();
+        assert!(error.to_string().contains("Task is missing model"));
+    }
+}
+
 #[tokio::test]
 async fn new_task_result_exposes_the_subagent_name_and_id_to_the_model() {
     let pending = CursorToolRuntime::default();
@@ -743,10 +872,18 @@ async fn new_task_result_exposes_the_subagent_name_and_id_to_the_model() {
         panic!("expected terminal Task result")
     };
 
-    assert_eq!(
-        completion.result().content,
-        "Subagent name: Analyze game logic\nSubagent ID: child-id"
-    );
+    assert!(completion.result().content.starts_with(
+        "Subagent name: Analyze game logic\nSubagent ID: child-id\nStatus: running in background"
+    ));
+    assert!(completion
+        .result()
+        .content
+        .contains("not a completed task result"));
+    assert!(completion
+        .result()
+        .content
+        .contains("Do not use resume to poll"));
+    assert!(!completion.result().is_error);
     let Some(pb::tool_call::Tool::TaskToolCall(tool)) = &completion.tool_call().tool else {
         panic!("expected TaskToolCall")
     };
@@ -758,6 +895,134 @@ async fn new_task_result_exposes_the_subagent_name_and_id_to_the_model() {
         panic!("expected typed Task success")
     };
     assert_eq!(success.agent_id.as_deref(), Some("child-id"));
+}
+
+#[tokio::test]
+async fn task_background_status_matches_the_ui_for_create_resume_and_client_backgrounding() {
+    for (resume, requested_background, background_reason) in [
+        (None, false, pb::SubagentBackgroundReason::Unspecified),
+        (None, true, pb::SubagentBackgroundReason::Unspecified),
+        (None, false, pb::SubagentBackgroundReason::UserRequest),
+        (
+            Some("child-id"),
+            false,
+            pb::SubagentBackgroundReason::QueuedFollowUp,
+        ),
+        (
+            Some("child-id"),
+            false,
+            pb::SubagentBackgroundReason::Unspecified,
+        ),
+    ] {
+        let pending = CursorToolRuntime::default();
+        let mut task = call("call-task", "Task");
+        task.arguments = json!({
+            "description": "Inspect game logic",
+            "prompt": "Inspect",
+            "run_in_background": requested_background,
+            "subagent_type": "generalPurpose"
+        });
+        if let Some(resume) = resume {
+            task.arguments["resume"] = json!(resume);
+        }
+        let id = pending.reserve_exec(&task, &exec_context()).await.unwrap();
+        let event = codec::client_event(
+            &pb::ExecClientMessage {
+                id,
+                message: Some(pb::exec_client_message::Message::SubagentResult(
+                    pb::SubagentResult {
+                        result: Some(pb::subagent_result::Result::Success(pb::SubagentSuccess {
+                            agent_id: "child-id".into(),
+                            final_message: Some("Client-supplied message".into()),
+                            background_reason: background_reason as i32,
+                            ..Default::default()
+                        })),
+                    },
+                )),
+                ..Default::default()
+            },
+            &pending,
+        )
+        .await
+        .unwrap();
+        let codec::ClientExecEvent::Completed(completion) = event else {
+            panic!("expected Task completion")
+        };
+        let Some(pb::tool_call::Tool::TaskToolCall(tool)) = &completion.tool_call().tool else {
+            panic!("expected TaskToolCall")
+        };
+        let Some(pb::task_result::Result::Success(success)) = tool
+            .result
+            .as_ref()
+            .and_then(|result| result.result.as_ref())
+        else {
+            panic!("expected typed Task success")
+        };
+        let background =
+            requested_background || background_reason != pb::SubagentBackgroundReason::Unspecified;
+        assert_eq!(success.is_background, background);
+        assert_eq!(
+            completion
+                .result()
+                .content
+                .contains("Status: running in background"),
+            background
+        );
+        assert!(completion
+            .result()
+            .content
+            .contains("Client-supplied message"));
+        assert!(!completion.result().is_error);
+        if background {
+            assert!(completion
+                .result()
+                .content
+                .contains("Subagent ID: child-id"));
+        } else if resume.is_some() {
+            assert_eq!(completion.result().content, "Client-supplied message");
+        }
+    }
+}
+
+#[tokio::test]
+async fn task_already_running_remains_a_real_rejected_resume_not_a_success() {
+    let pending = CursorToolRuntime::default();
+    let mut task = call("call-task", "Task");
+    task.arguments = json!({"description": "Inspect", "prompt": "Continue", "resume": "child-id"});
+    let id = pending.reserve_exec(&task, &exec_context()).await.unwrap();
+    let error =
+        "Sub-agent is currently running. You may send the follow-up message when it has completed.";
+    let event = codec::client_event(
+        &pb::ExecClientMessage {
+            id,
+            message: Some(pb::exec_client_message::Message::SubagentResult(
+                pb::SubagentResult {
+                    result: Some(pb::subagent_result::Result::Error(pb::SubagentError {
+                        agent_id: Some("child-id".into()),
+                        error: error.into(),
+                    })),
+                },
+            )),
+            ..Default::default()
+        },
+        &pending,
+    )
+    .await
+    .unwrap();
+    let codec::ClientExecEvent::Completed(completion) = event else {
+        panic!("expected rejected Task completion")
+    };
+    assert!(completion.result().is_error);
+    assert_eq!(completion.result().content, error);
+    let Some(pb::tool_call::Tool::TaskToolCall(tool)) = &completion.tool_call().tool else {
+        panic!("expected TaskToolCall")
+    };
+    assert!(matches!(
+        tool.result
+            .as_ref()
+            .and_then(|result| result.result.as_ref()),
+        Some(pb::task_result::Result::Error(_))
+    ));
 }
 
 #[tokio::test]

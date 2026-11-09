@@ -194,7 +194,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "2b26fb30f882b79a713719a829ec8b77a5143f253e34789c83732776f9e01854",
     );
     assert_mode(
         &assets,
@@ -216,7 +216,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "9a7e0f9e0bd8ef0af01032fa311686f72c42ec260e3057f6fae5e68f5ed36fb8",
+        "1a8d07b7412b76a4dcf4e3992c06bb76836fa5383e121d3189fa24df4d77946e",
     );
     assert_mode(
         &assets,
@@ -240,7 +240,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "2b26fb30f882b79a713719a829ec8b77a5143f253e34789c83732776f9e01854",
     );
     assert_mode(
         &assets,
@@ -266,7 +266,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "976b309dd91e314d4916439ebb9da8995751d011532e39934a1da7593dc78ccb",
+        "c17b5adfec8f59ad163ca961f1b8580019c4bcf1f86ffc7a7e1379b2f23aeabb",
     );
     assert_mode(
         &assets,
@@ -303,7 +303,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     );
     assert_eq!(
         schema_digest(&assets.mode(Mode::Agent).tools),
-        "282a1dff7957090d0a75eac4a46474ac7cffa1b0937bdf97354544e729bb15c2"
+        "c27dbee5e04cc6d08fdcffbd830c4d137e88f0b92dc16a54f4b74108bd0d3fdd"
     );
     let task = assets
         .mode(Mode::Agent)
@@ -321,6 +321,16 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
         .description
         .chars()
         .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
+    assert!(task.parameters["properties"]["resume"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("not a status or progress query"));
+    assert!(
+        task.parameters["properties"]["run_in_background"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("not a completed task result")
+    );
     let shell = assets
         .mode(Mode::Agent)
         .tools

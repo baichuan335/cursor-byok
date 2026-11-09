@@ -9,7 +9,7 @@ use crate::{
 
 use super::{now_ms, ToolCompletion};
 
-const SUBAGENTS_DISABLED_REMINDER: &str = "<system_reminder>The user has disabled the subagent model. Please remind the user to enable it in Cursor Settings → Models → Explore Subagent Model.</system_reminder>";
+const SUBAGENTS_DISABLED_REMINDER: &str = "<system_reminder>The requested subagent type is disabled in Cursor model settings. Use an enabled subagent type or ask the user to enable this type.</system_reminder>";
 
 pub(crate) fn local(call: &ToolCall, message_index: usize) -> Result<ToolCompletion> {
     match normalized(&call.name).as_str() {
