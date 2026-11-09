@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build without moving it
+        required: true
 
 permissions:
   contents: write
@@ -19,9 +24,11 @@ jobs:
     outputs:
       should_publish: ${{ steps.release.outputs.should_publish }}
       version: ${{ steps.version.outputs.version }}
+      source_commit: ${{ steps.version.outputs.source_commit }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
 
       - name: Verify release author
@@ -46,6 +53,8 @@ jobs:
 
       - name: Read and verify app version
         id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           version=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
@@ -53,14 +62,16 @@ jobs:
           cargo_version=$(sed -n '/^version = / { s/version = "\([^"]*\)"/\1/p; q; }' apps/desktop/src-tauri/Cargo.toml)
           test "${version}" = "${package_version}"
           test "${version}" = "${cargo_version}"
-          test "${GITHUB_REF_TYPE}" = "tag"
-          test "${GITHUB_REF_NAME}" = "v${version}"
+          test "${RELEASE_TAG}" = "v${version}"
+          source_commit=$(git rev-parse HEAD)
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "${source_commit}"
           git fetch origin main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+          if ! git merge-base --is-ancestor "${source_commit}" origin/main; then
             echo "Release tag must point to a commit contained in origin/main" >&2
             exit 1
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Check whether this version is already published
         id: release
@@ -94,18 +105,20 @@ jobs:
             args: "--bundles nsis"
             target: ""
           - platform: macos-aarch64
-            os: macos-15
-            args: "--target aarch64-apple-darwin"
+            os: macos-15-intel
+            args: "--target aarch64-apple-darwin --bundles dmg,app"
             target: aarch64-apple-darwin
           - platform: macos-x86_64
             os: macos-15-intel
-            args: "--target x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin --bundles dmg,app"
             target: x86_64-apple-darwin
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux-x86_64'
@@ -208,6 +221,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
 
       - uses: actions/download-artifact@v4
         with:
